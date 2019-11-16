@@ -28,6 +28,7 @@ else()
     clangAST
     clangBasic
     clangCodeGen
+    clangDependencyScanning
     clangFrontend
     clangIndex
     clangSerialization

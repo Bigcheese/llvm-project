@@ -119,6 +119,15 @@ CXStringSet *createSet(const std::vector<std::string> &Strings) {
   return Set;
 }
 
+CXStringSet *createSet(const llvm::StringSet<> &Strings) {
+  CXStringSet *Set = new CXStringSet;
+  Set->Count = Strings.size();
+  Set->Strings = new CXString[Set->Count];
+  int I = 0;
+  for (auto SI = Strings.begin(), SE = Strings.end(); SI != SE; ++SI)
+    Set->Strings[I++] = createDup(SI->getKey());
+  return Set;
+}
 
 //===----------------------------------------------------------------------===//
 // String pools.

@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang-c/Dependencies.h"
 #include "clang/AST/Mangle.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/CodeGen/ObjectFilePCHContainerOperations.h"
@@ -13,16 +14,17 @@
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendAction.h"
-#include "clang/Index/IndexingAction.h"
 #include "clang/Index/IndexDataConsumer.h"
+#include "clang/Index/IndexingAction.h"
 #include "clang/Index/USRGeneration.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Serialization/ASTReader.h"
+#include "llvm/ADT/FunctionExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/PrettyStackTrace.h"
 
 using namespace clang;
 using namespace clang::index;
@@ -35,18 +37,23 @@ namespace {
 enum class ActionType {
   None,
   PrintSourceSymbols,
+  ScanDeps,
 };
 
 namespace options {
 
 static cl::OptionCategory IndexTestCoreCategory("index-test-core options");
 
-static cl::opt<ActionType>
-Action(cl::desc("Action:"), cl::init(ActionType::None),
-       cl::values(
-          clEnumValN(ActionType::PrintSourceSymbols,
-                     "print-source-symbols", "Print symbols from source")),
-       cl::cat(IndexTestCoreCategory));
+static cl::opt<ActionType> Action(
+    cl::desc("Action:"), cl::init(ActionType::None),
+    cl::values(clEnumValN(ActionType::PrintSourceSymbols,
+                          "print-source-symbols", "Print symbols from source"),
+               clEnumValN(ActionType::ScanDeps, "scan-deps",
+                          "Get file dependencies")),
+    cl::cat(IndexTestCoreCategory));
+
+static cl::list<std::string> InputFiles(cl::Positional,
+                                        cl::desc("<filename>..."));
 
 static cl::extrahelp MoreHelp(
   "\nAdd \"-- <compiler arguments>\" at the end to setup the compiler "
@@ -315,6 +322,77 @@ static void printSymbolNameAndUSR(const clang::Module *Mod, raw_ostream &OS) {
   generateFullUSRForModule(Mod, OS);
 }
 
+static int scanDeps(ArrayRef<const char *> Args, std::string WorkingDirectory) {
+  CXDependencyScannerService Service =
+      clang_experimental_DependencyScannerService_create_v0(
+          CXDependencyMode_Full);
+  CXDependencyScannerWorker Worker =
+      clang_experimental_DependencyScannerWorker_create_v0(Service);
+  CXString Error;
+
+  auto Callback = [&](CXModuleDependencySet *MDS) {
+    llvm::outs() << "modules:\n";
+    for (const auto &M : llvm::makeArrayRef(MDS->Modules, MDS->Count)) {
+      llvm::outs() << "  module:\n"
+                   << "    name: " << clang_getCString(M.Name) << "\n"
+                   << "    context-hash: " << clang_getCString(M.ContextHash)
+                   << "\n"
+                   << "    module-map-path: "
+                   << clang_getCString(M.ModuleMapPath) << "\n"
+                   << "    module-deps:\n";
+      for (const auto &ModuleName :
+           llvm::makeArrayRef(M.ModuleDeps->Strings, M.ModuleDeps->Count))
+        llvm::outs() << "      " << clang_getCString(ModuleName) << "\n";
+      llvm::outs() << "    file-deps:\n";
+      for (const auto &FileName :
+           llvm::makeArrayRef(M.FileDeps->Strings, M.FileDeps->Count))
+        llvm::outs() << "      " << clang_getCString(FileName) << "\n";
+      llvm::outs() << "    build-args:";
+      for (const auto &Arg : llvm::makeArrayRef(M.BuildArguments->Strings,
+                                                M.BuildArguments->Count))
+        llvm::outs() << " " << clang_getCString(Arg);
+      llvm::outs() << "\n";
+    }
+    clang_experimental_ModuleDependencySet_dispose(MDS);
+  };
+
+  auto CB =
+      functionObjectToCCallbackRef<void(CXModuleDependencySet *)>(Callback);
+
+  CXFileDependencies *Result =
+      clang_experimental_DependencyScannerWorker_getFileDependencies_v0(
+          Worker, Args.size(), Args.data(), WorkingDirectory.c_str(),
+          CB.Callback, CB.Context, &Error);
+  if (!Result) {
+    llvm::errs() << "error: failed to get dependencies\n";
+    llvm::errs() << clang_getCString(Error) << "\n";
+    clang_disposeString(Error);
+    return 1;
+  }
+  llvm::outs() << "dependencies:\n";
+  llvm::outs() << "  context-hash: " << clang_getCString(Result->ContextHash)
+               << "\n"
+               << "  module-deps:\n";
+  for (const auto &ModuleName : llvm::makeArrayRef(Result->ModuleDeps->Strings,
+                                                   Result->ModuleDeps->Count))
+    llvm::outs() << "    " << clang_getCString(ModuleName) << "\n";
+  llvm::outs() << "  file-deps:\n";
+  for (const auto &FileName :
+       llvm::makeArrayRef(Result->FileDeps->Strings, Result->FileDeps->Count))
+    llvm::outs() << "    " << clang_getCString(FileName) << "\n";
+  llvm::outs() << "  additional-build-args:";
+  for (const auto &Arg :
+       llvm::makeArrayRef(Result->AdditionalArguments->Strings,
+                          Result->AdditionalArguments->Count))
+    llvm::outs() << " " << clang_getCString(Arg);
+  llvm::outs() << "\n";
+
+  clang_experimental_FileDependencies_dispose(Result);
+  clang_experimental_DependencyScannerWorker_dispose_v0(Worker);
+  clang_experimental_DependencyScannerService_dispose_v0(Service);
+  return 0;
+}
+
 //===----------------------------------------------------------------------===//
 // Command line processing.
 //===----------------------------------------------------------------------===//
@@ -356,6 +434,14 @@ int indextest_core_main(int argc, const char **argv) {
     return printSourceSymbols(Executable.c_str(), CompArgs,
                               options::DumpModuleImports,
                               options::IncludeLocals);
+  }
+
+  if (options::Action == ActionType::ScanDeps) {
+    if (options::InputFiles.empty()) {
+      errs() << "error: missing working directory\n";
+      return 1;
+    }
+    return scanDeps(CompArgs, options::InputFiles[0]);
   }
 
   return 0;
