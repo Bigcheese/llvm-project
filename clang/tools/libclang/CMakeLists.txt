@@ -19,6 +19,7 @@ set(SOURCES
   CXStoredDiagnostic.cpp
   CXString.cpp
   CXType.cpp
+  Driver.cpp
   Indexing.cpp
   FatalErrorHandler.cpp
 
