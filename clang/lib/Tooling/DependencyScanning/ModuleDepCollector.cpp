@@ -158,6 +158,10 @@ void ModuleDepCollectorPP::handleTopLevelModule(const Module *M) {
       *MF, true, true, [&](const serialization::InputFile &IF, bool isSystem) {
         MD.FileDeps.insert(IF.getFile()->getName());
       });
+  MD.NonPathCommandLine = {
+    "-remove-preceeding-explicit-module-build-incompatible-options",
+    "-fno-implicit-modules", "-emit-module", "-fmodule-name=" + MD.ModuleName,
+  };
 
   llvm::DenseSet<const Module *> AddedModules;
   addAllSubmoduleDeps(M, MD, AddedModules);

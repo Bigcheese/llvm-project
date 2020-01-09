@@ -178,7 +178,7 @@ static CXFileDependencies *getFullDependencies(
       for (const ClangModuleDep &CMD : MD.ClangModuleDeps)
         Modules.push_back(CMD.ModuleName + ":" + CMD.ContextHash);
       M.ModuleDeps = cxstring::createSet(Modules);
-      M.BuildArguments = cxstring::createSet(std::vector<std::string>{});
+      M.BuildArguments = cxstring::createSet(MD.NonPathCommandLine);
     }
     MDC(Context, MDS);
   }
@@ -191,7 +191,8 @@ static CXFileDependencies *getFullDependencies(
   for (const ClangModuleDep &CMD : FD.ClangModuleDeps)
     Modules.push_back(CMD.ModuleName + ":" + CMD.ContextHash);
   FDeps->ModuleDeps = cxstring::createSet(Modules);
-  FDeps->AdditionalArguments = cxstring::createSet(std::vector<std::string>{});
+  FDeps->AdditionalArguments =
+    cxstring::createSet(FD.AdditionalNonPathCommandLine);
   return FDeps;
 }
 
