@@ -260,9 +260,9 @@ void ModuleMap::resolveHeader(Module *Mod,
           << UmbrellaMod->getFullModuleName();
       else
         // Record this umbrella header.
-        setUmbrellaHeader(Mod, File, RelativePathName.str());
+        setUmbrellaHeader(Mod, File, Header.FileName, RelativePathName.str());
     } else {
-      Module::Header H = {RelativePathName.str(), File};
+      Module::Header H = {Header.FileName, RelativePathName.str(), File};
       if (Header.Kind == Module::HK_Excluded)
         excludeHeader(Mod, H);
       else
@@ -305,7 +305,7 @@ bool ModuleMap::resolveAsBuiltinHeader(
     return false;
 
   auto Role = headerKindToRole(Header.Kind);
-  Module::Header H = {Path.str(), *File};
+  Module::Header H = {Header.FileName, Path.str(), *File};
   addHeader(Mod, H, Role);
   return true;
 }
@@ -1018,11 +1018,14 @@ Module *ModuleMap::inferFrameworkModule(const DirectoryEntry *FrameworkDir,
   Result->NoUndeclaredIncludes |= Attrs.NoUndeclaredIncludes;
   Result->Directory = FrameworkDir;
 
+  // Chop off the first framework bit, as that is implied.
+  StringRef RelativePath =
+      UmbrellaName.str().substr(
+          Result->getTopLevelModule()->Directory->getName().size());
+  RelativePath = llvm::sys::path::relative_path(RelativePath);
+
   // umbrella header "umbrella-header-name"
-  //
-  // The "Headers/" component of the name is implied because this is
-  // a framework module.
-  setUmbrellaHeader(Result, *UmbrellaHeader, ModuleName + ".h");
+  setUmbrellaHeader(Result, *UmbrellaHeader, ModuleName + ".h", RelativePath);
 
   // export *
   Result->Exports.push_back(Module::ExportDecl(nullptr, true));
@@ -1082,6 +1085,9 @@ Module *ModuleMap::inferFrameworkModule(const DirectoryEntry *FrameworkDir,
   if (!Result->isSubFramework()) {
     inferFrameworkLink(Result, FrameworkDir, FileMgr);
   }
+  
+  Result->dump();
+  llvm::errs() << Result->Directory->getName() << "\n";
 
   return Result;
 }
@@ -1102,10 +1108,13 @@ Module *ModuleMap::createShadowedModule(StringRef Name, bool IsFramework,
 }
 
 void ModuleMap::setUmbrellaHeader(Module *Mod, const FileEntry *UmbrellaHeader,
-                                  Twine NameAsWritten) {
+                                  Twine NameAsWritten,
+                                  Twine PathRelativeToRootModuleDirectory) {
   Headers[UmbrellaHeader].push_back(KnownHeader(Mod, NormalHeader));
   Mod->Umbrella = UmbrellaHeader;
   Mod->UmbrellaAsWritten = NameAsWritten.str();
+  Mod->UmbrellaRelativeToRootModuleDirectory =
+      PathRelativeToRootModuleDirectory.str();
   UmbrellaDirs[UmbrellaHeader->getDir()] = Mod;
 
   // Notify callbacks that we just added a new header.
@@ -1114,9 +1123,12 @@ void ModuleMap::setUmbrellaHeader(Module *Mod, const FileEntry *UmbrellaHeader,
 }
 
 void ModuleMap::setUmbrellaDir(Module *Mod, const DirectoryEntry *UmbrellaDir,
-                               Twine NameAsWritten) {
+                               Twine NameAsWritten,
+                               Twine PathRelativeToRootModuleDirectory) {
   Mod->Umbrella = UmbrellaDir;
   Mod->UmbrellaAsWritten = NameAsWritten.str();
+  Mod->UmbrellaRelativeToRootModuleDirectory =
+      PathRelativeToRootModuleDirectory.str();
   UmbrellaDirs[UmbrellaDir] = Mod;
 }
 
@@ -2381,6 +2393,7 @@ void ModuleMapParser::parseUmbrellaDirDecl(SourceLocation UmbrellaLoc) {
   }
 
   std::string DirName = Tok.getString();
+  std::string DirNameAsWritten = DirName;
   SourceLocation DirNameLoc = consumeToken();
 
   // Check whether we already have an umbrella.
@@ -2423,7 +2436,8 @@ void ModuleMapParser::parseUmbrellaDirDecl(SourceLocation UmbrellaLoc) {
          I != E && !EC; I.increment(EC)) {
       if (auto FE = SourceMgr.getFileManager().getFile(I->path())) {
 
-        Module::Header Header = {I->path(), *FE};
+        // TODO: NameAsWritten
+        Module::Header Header = {"", I->path(), *FE};
         Headers.push_back(std::move(Header));
       }
     }
@@ -2444,7 +2458,7 @@ void ModuleMapParser::parseUmbrellaDirDecl(SourceLocation UmbrellaLoc) {
   }
 
   // Record this umbrella directory.
-  Map.setUmbrellaDir(ActiveModule, Dir, DirName);
+  Map.setUmbrellaDir(ActiveModule, Dir, DirNameAsWritten, DirName);
 }
 
 /// Parse a module export declaration.
